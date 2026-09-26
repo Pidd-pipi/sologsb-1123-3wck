@@ -6,9 +6,10 @@ import { useWaypointStore } from '../stores/waypointStore';
 import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, type RouteParams } from '../hooks/useRouteMetrics';
 import AmapRouteView from '../components/common/AmapRouteView';
 import OverlapCalcPanel from '../components/common/OverlapCalcPanel';
-import { loadFlightLine, saveFlightLine, splitSorties } from '../utils/db';
+import { loadFlightLine, saveFlightLine } from '../utils/db';
+import { buildSortiePlan, isPlanCurrent, toPlanSnapshot } from '../utils/sorties';
 import { newId } from '../utils/id';
-import type { FlightLine } from '../types/flightline';
+import type { FlightLine, SortiePlanRow, SortiePlanSnapshot } from '../types/flightline';
 import type { Waypoint } from '../types/waypoint';
 
 type LineRow = { key: string; label: string; value: string };
@@ -17,6 +18,32 @@ const lineColumns: NonNullable<TableProps<LineRow>['columns']> = [
   { title: '项', dataIndex: 'label', width: 160 },
   { title: '值', dataIndex: 'value' },
 ];
+
+const sortieColumns: NonNullable<TableProps<SortiePlanRow>['columns']> = [
+  { title: '架次', dataIndex: 'sortie', width: 80, render: (v: number) => `第 ${v} 架次` },
+  {
+    title: '起止序号',
+    width: 100,
+    render: (_: unknown, row: SortiePlanRow) =>
+      row.startSeq === row.endSeq ? `#${row.startSeq}` : `#${row.startSeq}–${row.endSeq}`,
+  },
+  { title: '航点数', dataIndex: 'waypointCount', width: 80 },
+  { title: '预计张数', dataIndex: 'photos', width: 90 },
+  { title: '预计时长 min', dataIndex: 'durationMin', width: 110 },
+];
+
+function SortieTable({ rows }: { rows: SortiePlanRow[] }) {
+  return (
+    <Table<SortiePlanRow>
+      rowKey="sortie"
+      size="small"
+      columns={sortieColumns}
+      dataSource={rows}
+      pagination={false}
+      locale={{ emptyText: '暂无航点，无法拆分架次' }}
+    />
+  );
+}
 
 /** /missions/:id/route 航线规划主视图：地图 + 参数面板实时回算 */
 export default function RoutePlanner() {
@@ -31,6 +58,7 @@ export default function RoutePlanner() {
   );
 
   const [params, setParams] = useState<RouteParams>({ ...DEFAULT_ROUTE_PARAMS });
+  const [savedLine, setSavedLine] = useState<FlightLine | null>(null);
   const [savedText, setSavedText] = useState('');
   const [error, setError] = useState('');
   const metrics = useRouteMetrics(id, params);
@@ -38,6 +66,7 @@ export default function RoutePlanner() {
   useEffect(() => {
     if (!id) return;
     void loadFlightLine(id).then((line) => {
+      setSavedLine(line ?? null);
       if (!line) return;
       setParams((prev) => ({
         ...prev,
@@ -56,25 +85,39 @@ export default function RoutePlanner() {
     }
   }, [missionWaypoints.length]);
 
+  const savedPlan: SortiePlanSnapshot | undefined = savedLine?.sortiePlan;
+  const savedPlanCurrent = isPlanCurrent(savedPlan, missionWaypoints);
+
   const onSave = async () => {
     if (!mission) return;
+    // 先按当前航点顺序构建计划：单个航点自身超限时不保存整套计划，并指明该航点
+    const built = buildSortiePlan(missionWaypoints, mission, params.overlapForward);
+    if ('error' in built) {
+      setError(built.message);
+      return;
+    }
+    const plan = toPlanSnapshot(built, missionWaypoints);
+    const updatedAt = Date.now();
     const line: FlightLine = {
-      id: newId('line'),
+      id: savedLine?.id ?? newId('line'),
       missionId: mission.id,
-      lineNo: 1,
+      lineNo: savedLine?.lineNo ?? 1,
       spacing: metrics.spacing,
       photoInterval: metrics.photoInterval,
       overlapForward: params.overlapForward,
       overlapSide: params.overlapSide,
       gsd: metrics.gsd,
-      estPhotos: metrics.estPhotos,
-      estDuration: metrics.estDuration,
-      batteryCount: metrics.batteryCount,
+      estPhotos: built.totalPhotos,
+      estDuration: built.totalDurationMin,
+      batteryCount: Math.max(1, built.sorties.length),
       heading: params.heading,
-      updatedAt: Date.now(),
+      sortiePlan: missionWaypoints.length > 0 ? plan : undefined,
+      updatedAt,
     };
     await saveFlightLine(line);
-    setSavedText(`已保存 ${new Date(line.updatedAt).toLocaleString('zh-CN')}`);
+    setSavedLine(line);
+    setSavedText(`已保存 ${new Date(updatedAt).toLocaleString('zh-CN')}`);
+    setError('');
   };
 
   const pickPoint = async (lng: number, lat: number) => {
@@ -166,27 +209,55 @@ export default function RoutePlanner() {
               pagination={false}
             />
           </Card>
-          <Card size="small" title="多架次拆分" style={{ marginTop: 14 }}>
-            <Space wrap size={6}>
-              {splitSorties({
-                id: 'preview',
-                missionId: mission.id,
-                lineNo: 1,
-                spacing: metrics.spacing,
-                photoInterval: metrics.photoInterval,
-                overlapForward: params.overlapForward,
-                overlapSide: params.overlapSide,
-                gsd: metrics.gsd,
-                estPhotos: metrics.estPhotos,
-                estDuration: metrics.estDuration,
-                batteryCount: metrics.batteryCount,
-                heading: params.heading,
-                updatedAt: Date.now(),
-              }).map((s) => (
-                <Tag key={s.sortie} color="blue">
-                  第 {s.sortie} 架次 · {s.photos} 张 · {s.durationMin} min
-                </Tag>
-              ))}
+          <Card
+            size="small"
+            title="多架次拆分（按航点顺序收束，单架次累计飞行/转弯/悬停 ≤ 20 min）"
+            style={{ marginTop: 14 }}
+            extra={
+              metrics.sortieError ? (
+                <Tag color="red">计划不可保存</Tag>
+              ) : (
+                <Tag color="blue">{metrics.sorties.length} 个架次</Tag>
+              )
+            }
+          >
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              {metrics.sortieError ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={`${metrics.sortieError.message}；已阻止保存，请调整后再保存航线参数。`}
+                />
+              ) : (
+                <>
+                  <Typography.Text strong>当前计划（实时）</Typography.Text>
+                  <SortieTable rows={metrics.sorties} />
+                </>
+              )}
+
+              {savedPlan ? (
+                <>
+                  <Space wrap size={6} style={{ marginTop: 2 }}>
+                    <Typography.Text strong>已保存计划</Typography.Text>
+                    <Tag color={savedPlanCurrent ? 'green' : 'default'}>
+                      {savedPlanCurrent ? '与当前航点一致' : '已失效'}
+                    </Tag>
+                    <Typography.Text type="secondary">
+                      保存于 {new Date(savedPlan.createdAt).toLocaleString('zh-CN')}
+                    </Typography.Text>
+                  </Space>
+                  {savedPlanCurrent ? null : (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="航点顺序或高度等已变化，旧架次计划已失效；保存航线参数后将按当前航点重新拆分。"
+                    />
+                  )}
+                  <SortieTable rows={savedPlan.sorties} />
+                </>
+              ) : (
+                <Typography.Text type="secondary">尚未保存架次计划（保存航线参数时会一并保存）。</Typography.Text>
+              )}
             </Space>
           </Card>
         </Col>

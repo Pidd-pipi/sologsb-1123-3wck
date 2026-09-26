@@ -1,6 +1,7 @@
-import { Button, Card, Col, Descriptions, Divider, InputNumber, Row, Slider, Space, Statistic, Table, Tag, Typography, type TableProps } from 'antd';
+import { Alert, Button, Card, Col, Descriptions, Divider, InputNumber, Row, Slider, Space, Statistic, Table, Tag, Typography, type TableProps } from 'antd';
 import { SaveOutlined } from '@ant-design/icons';
 import type { RouteMetrics, RouteParams } from '../../hooks/useRouteMetrics';
+import type { SortiePlanRow } from '../../types/flightline';
 
 export interface OverlapCalcPanelProps {
   params: RouteParams;
@@ -10,12 +11,17 @@ export interface OverlapCalcPanelProps {
   savedText?: string;
 }
 
-type SortieRow = { sortie: number; photos: number; durationMin: number };
-
-const columns: NonNullable<TableProps<SortieRow>['columns']> = [
-  { title: '架次', dataIndex: 'sortie', width: 70, render: (v: number) => `第 ${v} 架次` },
-  { title: '预计张数', dataIndex: 'photos', width: 100 },
-  { title: '预计耗时 min', dataIndex: 'durationMin', width: 120 },
+const columns: NonNullable<TableProps<SortiePlanRow>['columns']> = [
+  { title: '架次', dataIndex: 'sortie', width: 76, render: (v: number) => `第 ${v} 架次` },
+  {
+    title: '起止序号',
+    width: 92,
+    render: (_: unknown, row: SortiePlanRow) =>
+      row.startSeq === row.endSeq ? `#${row.startSeq}` : `#${row.startSeq}–${row.endSeq}`,
+  },
+  { title: '航点数', dataIndex: 'waypointCount', width: 70 },
+  { title: '预计张数', dataIndex: 'photos', width: 80 },
+  { title: '时长 min', dataIndex: 'durationMin', width: 80 },
 ];
 
 /**
@@ -106,23 +112,33 @@ export default function OverlapCalcPanel({ params, onChange, metrics, onSave, sa
           <Descriptions.Item label="旁向幅宽">{metrics.coverageSide} m</Descriptions.Item>
         </Descriptions>
         <div style={{ marginTop: 6 }}>
-          {metrics.sorties.map((s) => (
-            <Tag key={s.sortie} color="blue">
-              第 {s.sortie} 架次 · {s.photos} 张 · {s.durationMin} min
-            </Tag>
-          ))}
+          {metrics.sortieError ? (
+            <Alert type="error" showIcon message={metrics.sortieError.message} />
+          ) : metrics.sorties.length === 0 ? (
+            <Typography.Text type="secondary">暂无航点，无法拆分架次</Typography.Text>
+          ) : (
+            metrics.sorties.map((s) => (
+              <Tag key={s.sortie} color="blue">
+                第 {s.sortie} 架次 · #{s.startSeq}–{s.endSeq} · {s.waypointCount} 点 · {s.photos} 张 · {s.durationMin} min
+              </Tag>
+            ))
+          )}
         </div>
       </Card>
 
-      <Card size="small" title="多架次拆分">
-        <Table<SortieRow>
-          rowKey="sortie"
-          size="small"
-          columns={columns}
-          dataSource={metrics.sorties}
-          pagination={false}
-          locale={{ emptyText: '暂无架次拆分' }}
-        />
+      <Card size="small" title={`多架次拆分（单架次 ≤ 20 min，按航点顺序收束）`}>
+        {metrics.sortieError ? (
+          <Alert type="error" showIcon message={metrics.sortieError.message} />
+        ) : (
+          <Table<SortiePlanRow>
+            rowKey="sortie"
+            size="small"
+            columns={columns}
+            dataSource={metrics.sorties}
+            pagination={false}
+            locale={{ emptyText: '暂无航点，无法拆分架次' }}
+          />
+        )}
       </Card>
     </Space>
   );

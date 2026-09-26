@@ -4,6 +4,7 @@ import type { Waypoint } from '../types/waypoint';
 import type { FlightLine } from '../types/flightline';
 import { makeThumbDataUrl, type AssetThumb, type ImageAsset } from '../types/imageasset';
 import { newId } from './id';
+import { buildSortiePlan, toPlanSnapshot } from './sorties';
 
 export const DB_NAME = 'gbdronemap';
 export const DB_VERSION = 2;
@@ -83,22 +84,9 @@ export async function loadFlightLine(missionId: string): Promise<FlightLine | un
   return rows.sort((a, b) => a.lineNo - b.lineNo)[0];
 }
 
-/** 保存 / 更新航线参数 */
+/** 保存 / 更新航线参数（含架次计划快照） */
 export async function saveFlightLine(line: FlightLine): Promise<void> {
   await db.lines.put(line);
-}
-
-/** 按航线参数把任务拆分为多架次（每架次按电池组数分组） */
-export function splitSorties(line: FlightLine): { sortie: number; photos: number; durationMin: number }[] {
-  const perSortie = 20; // 每组电池有效续航 20 min
-  const count = Math.max(1, Math.ceil(line.estDuration / perSortie));
-  const photosPer = Math.ceil(line.estPhotos / count);
-  const durationPer = Math.round((line.estDuration / count) * 10) / 10;
-  return Array.from({ length: count }, (_, i) => ({
-    sortie: i + 1,
-    photos: photosPer,
-    durationMin: durationPer,
-  }));
 }
 
 /** 首次进入灌入示范任务、航点、航线参数与成果影像条目 */
@@ -200,37 +188,46 @@ export async function ensureSeedData(): Promise<void> {
     hoverSec: 0,
   });
 
+  const seedTimestamp = now - 30 * day;
+  const buildSeedLine = (
+    mission: Mission,
+    missionWps: Waypoint[],
+    base: Pick<FlightLine, 'spacing' | 'photoInterval' | 'overlapForward' | 'overlapSide' | 'gsd' | 'heading'>,
+    timestamp: number,
+  ): FlightLine => {
+    const result = buildSortiePlan(missionWps, mission, base.overlapForward);
+    const plan = 'error' in result ? undefined : toPlanSnapshot(result, missionWps, timestamp);
+    return {
+      id: newId('line'),
+      missionId: mission.id,
+      lineNo: 1,
+      spacing: base.spacing,
+      photoInterval: base.photoInterval,
+      overlapForward: base.overlapForward,
+      overlapSide: base.overlapSide,
+      gsd: base.gsd,
+      estPhotos: plan ? plan.totalPhotos : 0,
+      estDuration: plan ? plan.totalDurationMin : 0,
+      batteryCount: plan ? Math.max(1, plan.sorties.length) : 1,
+      heading: base.heading,
+      sortiePlan: plan,
+      updatedAt: timestamp,
+    };
+  };
+
   const lines: FlightLine[] = [
-    {
-      id: newId('line'),
-      missionId: missionA,
-      lineNo: 1,
-      spacing: 62.5,
-      photoInterval: 24.8,
-      overlapForward: 75,
-      overlapSide: 70,
-      gsd: 3.22,
-      estPhotos: 12,
-      estDuration: 3.6,
-      batteryCount: 1,
-      heading: 90,
-      updatedAt: now - 30 * day,
-    },
-    {
-      id: newId('line'),
-      missionId: missionB,
-      lineNo: 1,
-      spacing: 92.3,
-      photoInterval: 42.1,
-      overlapForward: 70,
-      overlapSide: 65,
-      gsd: 1.89,
-      estPhotos: 9,
-      estDuration: 4.2,
-      batteryCount: 1,
-      heading: 45,
-      updatedAt: now - 8 * day,
-    },
+    buildSeedLine(
+      missions[0],
+      waypoints.filter((w) => w.missionId === missionA),
+      { spacing: 62.5, photoInterval: 24.8, overlapForward: 75, overlapSide: 70, gsd: 3.22, heading: 90 },
+      seedTimestamp,
+    ),
+    buildSeedLine(
+      missions[1],
+      waypoints.filter((w) => w.missionId === missionB),
+      { spacing: 92.3, photoInterval: 42.1, overlapForward: 70, overlapSide: 65, gsd: 1.89, heading: 45 },
+      now - 8 * day,
+    ),
   ];
 
   const assets: ImageAsset[] = [];
