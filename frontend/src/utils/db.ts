@@ -4,6 +4,7 @@ import type { Waypoint } from '../types/waypoint';
 import type { FlightLine } from '../types/flightline';
 import { makeThumbDataUrl, type AssetThumb, type ImageAsset } from '../types/imageasset';
 import { newId } from './id';
+import { createPlanSnapshot } from './sortiePlan';
 
 export const DB_NAME = 'gbdronemap';
 export const DB_VERSION = 2;
@@ -86,19 +87,6 @@ export async function loadFlightLine(missionId: string): Promise<FlightLine | un
 /** 保存 / 更新航线参数 */
 export async function saveFlightLine(line: FlightLine): Promise<void> {
   await db.lines.put(line);
-}
-
-/** 按航线参数把任务拆分为多架次（每架次按电池组数分组） */
-export function splitSorties(line: FlightLine): { sortie: number; photos: number; durationMin: number }[] {
-  const perSortie = 20; // 每组电池有效续航 20 min
-  const count = Math.max(1, Math.ceil(line.estDuration / perSortie));
-  const photosPer = Math.ceil(line.estPhotos / count);
-  const durationPer = Math.round((line.estDuration / count) * 10) / 10;
-  return Array.from({ length: count }, (_, i) => ({
-    sortie: i + 1,
-    photos: photosPer,
-    durationMin: durationPer,
-  }));
 }
 
 /** 首次进入灌入示范任务、航点、航线参数与成果影像条目 */
@@ -200,6 +188,11 @@ export async function ensureSeedData(): Promise<void> {
     hoverSec: 0,
   });
 
+  // 架次计划随航线参数一起保存；单航点自身不超时即可生成快照
+  const seedNow = now - 8 * day;
+  const planA = createPlanSnapshot(waypoints.filter((w) => w.missionId === missionA), 8, 12, now - 30 * day);
+  const planB = createPlanSnapshot(waypoints.filter((w) => w.missionId === missionB), 10, 9, seedNow);
+
   const lines: FlightLine[] = [
     {
       id: newId('line'),
@@ -211,10 +204,11 @@ export async function ensureSeedData(): Promise<void> {
       overlapSide: 70,
       gsd: 3.22,
       estPhotos: 12,
-      estDuration: 3.6,
-      batteryCount: 1,
+      estDuration: planA.snapshot?.totalDurationMin ?? 3.6,
+      batteryCount: planA.snapshot?.sorties.length ?? 1,
       heading: 90,
       updatedAt: now - 30 * day,
+      plan: planA.snapshot,
     },
     {
       id: newId('line'),
@@ -226,10 +220,11 @@ export async function ensureSeedData(): Promise<void> {
       overlapSide: 65,
       gsd: 1.89,
       estPhotos: 9,
-      estDuration: 4.2,
-      batteryCount: 1,
+      estDuration: planB.snapshot?.totalDurationMin ?? 4.2,
+      batteryCount: planB.snapshot?.sorties.length ?? 1,
       heading: 45,
-      updatedAt: now - 8 * day,
+      updatedAt: seedNow,
+      plan: planB.snapshot,
     },
   ];
 

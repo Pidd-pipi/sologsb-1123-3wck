@@ -1,5 +1,6 @@
 import { Button, Card, Col, Descriptions, Divider, InputNumber, Row, Slider, Space, Statistic, Table, Tag, Typography, type TableProps } from 'antd';
 import { SaveOutlined } from '@ant-design/icons';
+import type { SortiePlan } from '../../types/flightline';
 import type { RouteMetrics, RouteParams } from '../../hooks/useRouteMetrics';
 
 export interface OverlapCalcPanelProps {
@@ -8,21 +9,25 @@ export interface OverlapCalcPanelProps {
   metrics: RouteMetrics;
   onSave?: () => void;
   savedText?: string;
+  /** 存在超时航点时禁用保存 */
+  saveDisabled?: boolean;
 }
 
-type SortieRow = { sortie: number; photos: number; durationMin: number };
-
-const columns: NonNullable<TableProps<SortieRow>['columns']> = [
-  { title: '架次', dataIndex: 'sortie', width: 70, render: (v: number) => `第 ${v} 架次` },
-  { title: '预计张数', dataIndex: 'photos', width: 100 },
-  { title: '预计耗时 min', dataIndex: 'durationMin', width: 120 },
+/** 航线页与参数面板共用的架次明细表列定义 */
+export const sortieColumns: NonNullable<TableProps<SortiePlan>['columns']> = [
+  { title: '架次', dataIndex: 'sortie', width: 80, render: (v: number) => `第 ${v} 架次` },
+  { title: '起始序号', dataIndex: 'startSeq', width: 90, render: (v: number) => `#${v}` },
+  { title: '结束序号', dataIndex: 'endSeq', width: 90, render: (v: number) => `#${v}` },
+  { title: '航点数', dataIndex: 'waypointCount', width: 80 },
+  { title: '预计张数', dataIndex: 'photos', width: 90 },
+  { title: '预计时长 min', dataIndex: 'durationMin', width: 110 },
 ];
 
 /**
  * 重叠率 / 航高 / 航速表单与 GSD、航线间距、预计张数的实时回算面板。
  * 被航线规划页（/missions/:id/route）与相机预设页（/settings/camera）消费。
  */
-export default function OverlapCalcPanel({ params, onChange, metrics, onSave, savedText }: OverlapCalcPanelProps) {
+export default function OverlapCalcPanel({ params, onChange, metrics, onSave, savedText, saveDisabled }: OverlapCalcPanelProps) {
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }} data-testid="overlap-calc-panel">
       <Card size="small" title="航线参数">
@@ -66,7 +71,7 @@ export default function OverlapCalcPanel({ params, onChange, metrics, onSave, sa
           <>
             <Divider style={{ margin: '10px 0' }} />
             <Space>
-              <Button type="primary" icon={<SaveOutlined />} onClick={onSave}>
+              <Button type="primary" icon={<SaveOutlined />} onClick={onSave} disabled={saveDisabled}>
                 保存航线参数
               </Button>
               {savedText ? <Typography.Text type="secondary">{savedText}</Typography.Text> : null}
@@ -106,22 +111,28 @@ export default function OverlapCalcPanel({ params, onChange, metrics, onSave, sa
           <Descriptions.Item label="旁向幅宽">{metrics.coverageSide} m</Descriptions.Item>
         </Descriptions>
         <div style={{ marginTop: 6 }}>
-          {metrics.sorties.map((s) => (
-            <Tag key={s.sortie} color="blue">
-              第 {s.sortie} 架次 · {s.photos} 张 · {s.durationMin} min
-            </Tag>
-          ))}
+          {metrics.overLimitSeq !== undefined ? (
+            <Typography.Text type="danger">
+              航点 #{metrics.overLimitSeq} 自身耗时超过 20 min，无法切分架次，请先调整该航点
+            </Typography.Text>
+          ) : (
+            metrics.sorties.map((s) => (
+              <Tag key={s.sortie} color="blue">
+                第 {s.sortie} 架次 · #{s.startSeq}–#{s.endSeq}（{s.waypointCount} 点）· {s.photos} 张 · {s.durationMin} min
+              </Tag>
+            ))
+          )}
         </div>
       </Card>
 
-      <Card size="small" title="多架次拆分">
-        <Table<SortieRow>
+      <Card size="small" title="多架次拆分（每架次不超过 20 min）">
+        <Table<SortiePlan>
           rowKey="sortie"
           size="small"
-          columns={columns}
+          columns={sortieColumns}
           dataSource={metrics.sorties}
           pagination={false}
-          locale={{ emptyText: '暂无架次拆分' }}
+          locale={{ emptyText: metrics.overLimitSeq !== undefined ? '存在超时航点，暂不可拆分' : '暂无架次拆分' }}
         />
       </Card>
     </Space>
